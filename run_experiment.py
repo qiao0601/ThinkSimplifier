@@ -136,6 +136,14 @@ def run_experiment(args):
             )
             correct = Evaluator.is_correct(pred_answer, true_answer, dataset=config.DATASET_ALIAS)
 
+            pred_answer_out = pred_answer if pred_answer is not None else "none"
+            pred_confidence_out = pred_info.get("confidence_level")
+            pred_source_out = pred_info.get("source_type")
+            if pred_confidence_out is None or str(pred_confidence_out).strip() == "":
+                pred_confidence_out = "none"
+            if pred_source_out is None or str(pred_source_out).strip() == "":
+                pred_source_out = "none"
+
             first_correct_tokens = None
             outcome_eff = 0.0
             if gen_tokens > 0 and true_answer is not None:
@@ -153,9 +161,9 @@ def run_experiment(args):
                 {
                     "question": question,
                     "true_answer": true_answer,
-                    "pred_answer": pred_answer,
-                    "pred_confidence": pred_info["confidence_level"],
-                    "pred_source": pred_info["source_type"],
+                    "pred_answer": pred_answer_out,
+                    "pred_confidence": pred_confidence_out,
+                    "pred_source": pred_source_out,
                     "time": gen_time,
                     "tokens": gen_tokens,
                     "correct": correct,

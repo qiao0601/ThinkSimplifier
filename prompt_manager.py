@@ -3,6 +3,15 @@
 
 class PromptManager:
     @staticmethod
+    def _dataset_alias(dataset: str):
+        d = (dataset or "gsm8k").lower()
+        if d in {"aime", "aime2024"}:
+            return "aime2024"
+        if d in {"math", "math500"}:
+            return "math500"
+        return "gsm8k"
+
+    @staticmethod
     def _final_suffix(dataset: str) -> str:
         d = PromptManager._dataset_alias(dataset)
 
@@ -43,7 +52,7 @@ class PromptManager:
         )
 
     @staticmethod
-    def build_prompt(question, strategy="baseline"):
+    def build_prompt(question, strategy="baseline", dataset="gsm8k"):
         q = f"Question: {question}\n"
 
         if strategy == "prompt_baseline_cot":
@@ -69,10 +78,7 @@ class PromptManager:
             )
         elif strategy in {
             "baseline",
-            "early_stop",
             "confidence_stop",
-            "confidence_stop_native",
-            "dynamic_cot_native",
             "dynamic_cot",
             "answer_consistency",
             "es_cot",
@@ -84,4 +90,4 @@ class PromptManager:
         else:
             raise ValueError(f"Unknown strategy: {strategy}")
 
-        return q + instr +  PromptManager._final_suffix(dataset)
+        return q + instr + PromptManager._final_suffix(dataset)

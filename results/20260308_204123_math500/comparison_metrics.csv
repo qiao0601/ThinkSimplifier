@@ -1,0 +1,4 @@
+﻿strategy,accuracy,avg_tokens,avg_time,compression_ratio,speedup_ratio,outcome_eff_mean
+baseline,0.0,128.0,0.5780175924301147,1.0,1.0,0.0
+dynamic_cot,0.0,641.0,3.336784243583679,5.0078125,0.17322594157581148,0.0
+answer_consistency,0.0,128.0,0.6802704334259033,1.0,0.8496879535380745,0.0

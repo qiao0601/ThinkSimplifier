@@ -56,14 +56,14 @@ class Config:
 
         # Answer Consistency
         self.AC_K = 3
-        self.AC_WINDOW_SIZE = 5
+        self.AC_WINDOW_SIZE = 6
         self.AC_MIN_VALID_PROBES = 3
         self.AC_MIN_CONSECUTIVE = 2
         self.AC_PROBE_MAX_NEW_TOKENS = 20
         self.AC_MIN_TOKENS_BETWEEN_PROBES = 24
-        self.AC_BOUNDARY_CHARS = ".!?\n"
+        self.AC_BOUNDARY_CHARS = ".!\n"
         self.AC_PROBE_TAIL_CHARS = 512
-        self.AC_DEBUG = False
+        self.AC_DEBUG = True
 
         # ES-CoT
         self.ES_DMIN = 2.0
@@ -71,28 +71,33 @@ class Config:
         self.ES_MIN_RUNS = 3
         self.ES_MIN_STEP_ANS = 4
         self.ES_MIN_PREV_DIFFS = 2
-        self.ES_STABLE_RUN_STOP = 4
+        self.ES_STABLE_RUN_STOP = 3
         self.ES_MIN_TOKENS_BETWEEN_PROBES = 20
         self.ES_BOUNDARY_CHARS = "\n"
-        self.ES_DEBUG = False
+        self.ES_DEBUG = True
 
         # Confidence stop (boost-think)
-        self.TTA_ALPHA = 0.9
-        self.TTA_MAX_BOOST = 6.0
+        self.TTA_ALPHA = 0.5
+        self.TTA_MAX_BOOST = 10.0
         self.TTA_BOUNDARY_CHARS = ".!?\n"
-        self.TTA_MIN_TOKENS_BEFORE_BOOST = 80
+        self.TTA_MIN_TOKENS_BEFORE_BOOST = 256
         self.TTA_BOOST_INTERVAL = 8
         self.TTA_COMPLETION_MAX_NEW_TOKENS = 48
-        self.TTA_DEBUG = False
+        self.TTA_DEBUG = True
 
         # Dynamic CoT
+        #_generate_continuation_with_budget
+        self.MAX_POSITION_EMBEDDINGS = None
+        self.MODEL_MAX_LENGTH = None
+
+        
         self.DCOT_STAGE1_MAX_NEW_TOKENS = 96
         self.DCOT_STAGE2_MAX_NEW_TOKENS = 192
         self.DCOT_STAGE3_MAX_NEW_TOKENS = 384
         self.DCOT_STAGE1_BASE_THRESHOLD = 0.62
         self.DCOT_STAGE2_BASE_THRESHOLD = 0.72
         self.DCOT_COMPLEXITY_ALPHA = 0.18
-        self.DCOT_DEBUG = False
+        self.DCOT_DEBUG = True
 
     def apply_dataset(self, alias: str, split_override: str = None):
         if alias not in self.DATASET_PRESETS:

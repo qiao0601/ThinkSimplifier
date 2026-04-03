@@ -1,0 +1,2 @@
+﻿strategy,accuracy,avg_tokens,avg_time,compression_ratio,speedup_ratio,outcome_eff_mean
+baseline,0.0,32.0,0.12445545196533203,1.0,1.0,0.0

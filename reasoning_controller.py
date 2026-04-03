@@ -23,9 +23,6 @@ class ReasoningController:
             self.end_think_token_ids[0] if len(self.end_think_token_ids) > 0 else None
         )
 
-        self.conf_threshold = 0.9
-        self.stable_steps = 3
-
     def generate(self, question, strategy="baseline"):
         prompt = PromptManager.build_prompt(question, strategy,dataset=self.dataset)
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
@@ -35,20 +32,14 @@ class ReasoningController:
         if strategy == "baseline":
             return self._generate_full(inputs, prompt)
 
-        if strategy == "early_stop":
-            return self._token_by_token_generation(inputs, mode="early_stop")
         if strategy == "answer_consistency":
             return self._answer_consistency_generation(inputs, prompt)
         if strategy == "es_cot":
             return self._es_cot_generation(inputs, prompt)
-        if strategy == "dynamic_cot_native":
-            return self._token_by_token_generation(inputs, mode="dynamic")
         if strategy == "dynamic_cot":
             return self._dynamic_cot_generation(question, prompt)
         if strategy == "confidence_stop":
             return self._tta_generation(inputs, prompt)
-        if strategy == "confidence_stop_native":
-            return self._token_by_token_generation(inputs, mode="confidence")
 
         return self._generate_full(inputs, prompt)
 
@@ -99,15 +90,33 @@ class ReasoningController:
     def _append_hash_answer_if_missing(self, text: str, answer: str):
         if not text or answer is None:
             return text
+        if self.dataset == "math500":
+            if "\\boxed{" in text:
+                return text
+            return text.rstrip() + f"\n\\boxed{{{answer}}}"
         if "####" in text:
             return text
         return text.rstrip() + f"\n#### {answer}"
 
+    def _final_answer_prefix(self):
+        if self.dataset == "math500":
+            return "\nFinal answer (one line): \\boxed{"
+        return "\nFinal answer (one line): #### "
+
     def _finalize_text(self, text: str):
         text = (text or "").strip()
         info = Evaluator.extract_answer_info(text, dataset=self.dataset)
-        answer = info["answer"]
+        answer = info.get("answer")
+        confidence_level = info.get("confidence_level")
+        source_type = info.get("source_type")
+        safe_sources = {"hash", "boxed", "strong_final_line"}
+
+        # Only write back when extraction is both strict and from safe source.
         if answer is None:
+            return text
+        if confidence_level != "strict":
+            return text
+        if source_type not in safe_sources:
             return text
 
         if self.dataset == "math500":
@@ -119,68 +128,6 @@ class ReasoningController:
             return text + f"\n#### {answer}"
         return text
 
-    def _token_by_token_generation(self, inputs, mode):
-        generated = inputs["input_ids"]
-        attention_mask = inputs["attention_mask"]
-        past_key_values = None
-        selected_token = None
-
-        stable_counter = 0
-        generated_text = ""
-
-        start_time = time.time()
-        for _ in range(self.config.MAX_NEW_TOKENS):
-            outputs, logits = self._decode_one_token_step(
-                generated=generated,
-                attention_mask=attention_mask,
-                past_key_values=past_key_values,
-                last_token_input=selected_token,
-            )
-            probs = torch.softmax(logits, dim=-1)
-            confidence, next_token = torch.max(probs, dim=-1)
-            next_token = next_token.unsqueeze(-1)
-
-            past_key_values = outputs.past_key_values
-            generated = torch.cat([generated, next_token], dim=-1)
-            attention_mask = torch.cat(
-                [attention_mask, torch.ones((attention_mask.size(0), 1), device=attention_mask.device)],
-                dim=-1,
-            )
-            selected_token = next_token
-
-            token_text = self.tokenizer.decode(
-                next_token[0], skip_special_tokens=False, clean_up_tokenization_spaces=False
-            )
-            generated_text += token_text
-
-            if next_token.item() == self.tokenizer.eos_token_id:
-                break
-
-            info = Evaluator.extract_answer_info(generated_text, dataset=self.dataset)
-            extracted = info["answer"]
-
-            if mode == "early_stop":
-                if extracted is not None:
-                    generated_text = self._append_hash_answer_if_missing(generated_text, extracted)
-                    break
-            elif mode == "confidence":
-                if extracted is not None and confidence.item() >= self.conf_threshold:
-                    generated_text = self._append_hash_answer_if_missing(generated_text, extracted)
-                    break
-            elif mode == "dynamic":
-                if confidence.item() >= self.conf_threshold:
-                    stable_counter += 1
-                else:
-                    stable_counter = 0
-                if stable_counter >= self.stable_steps and extracted is not None:
-                    generated_text = self._append_hash_answer_if_missing(generated_text, extracted)
-                    break
-
-        end_time = time.time()
-        generated_text = generated_text.strip()
-        tokens_generated = generated.shape[1] - inputs["input_ids"].shape[1]
-        return generated_text, end_time - start_time, tokens_generated
-
     def _probe_step_answer(self, prompt: str, partial_reasoning: str, probe_kind: str):
         tail_chars = getattr(self.config, "AC_PROBE_TAIL_CHARS", 512)
         question_only = prompt.split("Answer:")[0] if "Answer:" in prompt else prompt
@@ -188,21 +135,27 @@ class ReasoningController:
             partial_reasoning[-tail_chars:] if len(partial_reasoning) > tail_chars else partial_reasoning
         )
 
-        if probe_kind == "es_cot":
+        if self.dataset == "math500":
             probe_instr = (
-                "Based on the partial reasoning above, output your current best final answer.\n"
+                "Given the draft reasoning above, output only your current best final expression.\n"
+                "Output exactly one line: \\boxed{<final expression>}\n"
+                "\\boxed{"
+            )
+        elif probe_kind == "es_cot":
+            probe_instr = (
+                "Based on the partial reasoning above, output only your current best final answer.\n"
                 "Output exactly one line: #### <answer>\n"
                 "#### "
             )
         elif probe_kind == "dynamic":
             probe_instr = (
                 "Give your current best final answer from this draft.\n"
-                "Output exactly one line: #### <answer>\n"
+                "Output only exactly one line: #### <answer>\n"
                 "#### "
             )
         else:
             probe_instr = (
-                "Given the draft reasoning above, output your current best final answer.\n"
+                "Given the draft reasoning above, output only your current best final answer.\n"
                 "Output exactly one line: #### <answer>\n"
                 "#### "
             )
@@ -223,9 +176,12 @@ class ReasoningController:
         decoded_new = self.tokenizer.decode(gen_ids, skip_special_tokens=False).strip()
 
         candidate = decoded_new
-        if not candidate.startswith("####"):
-            candidate = f"#### {candidate}"
-
+        if self.dataset == "math500":
+            if "\\boxed{" not in candidate:
+                candidate = f"\\boxed{{{candidate}}}"
+        else:
+            if not candidate.startswith("####"):
+                candidate = f"#### {candidate}"
         answer = Evaluator.extract_answer(candidate, dataset=self.dataset)
         if answer is None:
             plain = decoded_new.strip()
@@ -234,6 +190,7 @@ class ReasoningController:
         return answer
 
     def _answer_consistency_generation(self, inputs, prompt):
+
         generated = inputs["input_ids"]
         attention_mask = inputs["attention_mask"]
         past_key_values = None
@@ -295,7 +252,7 @@ class ReasoningController:
             counts = Counter(window)
             majority_answer, majority_count = counts.most_common(1)[0]
 
-            trailing = 0
+            trailing =   0
             for x in reversed(probe_answers):
                 if Evaluator.answers_equivalent(x, majority_answer, dataset=self.dataset):
                     trailing += 1
@@ -320,7 +277,8 @@ class ReasoningController:
         generated_text = generated_text.strip()
         tokens_generated = generated.shape[1] - inputs["input_ids"].shape[1]
         return generated_text, end_time - start_time, tokens_generated
-
+    
+    #不是严谨统计检验，只是个 heuristic z-rule
     def _run_jump_test(self, d_latest: float, prev_diffs: list, dmin: float, p: float):
         if d_latest <= dmin:
             return False
@@ -410,11 +368,12 @@ class ReasoningController:
                 current_run_len = 1
             elif Evaluator.answers_equivalent(step_answer, last_step_answer, dataset=self.dataset):
                 current_run_len += 1
-            else:
+            else:       #如果答案变了，就结束旧段，开启新段
                 run_lengths.append(current_run_len)
                 last_step_answer = step_answer
                 current_run_len = 1
 
+            #run_lengths = [2, 3]    current_run_len = 2  r_hat = [2, 3, 2]
             r_hat = run_lengths + [current_run_len]
 
             if es_debug:
@@ -427,9 +386,11 @@ class ReasoningController:
                 generated_text = self._append_hash_answer_if_missing(generated_text, last_step_answer)
                 break
 
+            #第二个早停条件：run length 出现“跳跃式增长”
             if len(step_answers) >= min_step_ans and len(r_hat) >= min_runs:
+                #r_hat = [1, 2, 5]  diffs = [1, 3]  最近这段连续稳定长度的增长，是否比过去明显大很多
                 diffs = [r_hat[i] - r_hat[i - 1] for i in range(1, len(r_hat))]
-                if diffs:
+                if diffs:       #diffs = [1, 3] diffs = [1, 3]  prev_diffs = [1]
                     d_latest = diffs[-1]
                     prev_diffs = diffs[:-1]
                     if self._run_jump_test(d_latest, prev_diffs, dmin=dmin, p=pval):
@@ -479,7 +440,7 @@ class ReasoningController:
         return boosted_logits, True
 
     def _complete_final_answer_after_stop(self, generated, current_text: str):
-        suffix = "\nFinal answer (one line): #### "
+        suffix = self._final_answer_prefix()
         suffix_ids = self.tokenizer(suffix, return_tensors="pt")["input_ids"].to(self.model.device)
         completion_input_ids = torch.cat([generated, suffix_ids], dim=-1)
         completion_attention_mask = torch.ones_like(completion_input_ids, device=self.model.device)
@@ -595,6 +556,29 @@ class ReasoningController:
 
     def _generate_continuation_with_budget(self, prompt: str, existing_text: str, add_new_tokens: int):
         full_prompt = prompt + existing_text
+        #考虑模型的最大上下文长度
+        max_ctx = getattr(self.model.config, "max_position_embeddings", None)
+        if max_ctx is None:
+            tok_max = getattr(self.tokenizer, "model_max_length", None)
+            if isinstance(tok_max, int) and tok_max < 10_000_000:
+                max_ctx = tok_max
+        
+        #可能截断 existing_text 以留出空间给新生成的 toke
+        if max_ctx is not None:
+            prompt_ids = self.tokenizer(prompt, add_special_tokens=False).input_ids
+            exist_ids = self.tokenizer(existing_text, add_special_tokens=False).input_ids
+            reserve = max(add_new_tokens + 8, 32)
+            allow_exist = max_ctx - len(prompt_ids) - reserve
+            if allow_exist < len(exist_ids):
+                if allow_exist <= 0:
+                    exist_ids = []
+                else:
+                    exist_ids = exist_ids[-allow_exist:]
+                existing_text = self.tokenizer.decode(
+                    exist_ids, skip_special_tokens=False, clean_up_tokenization_spaces=False
+                )
+                full_prompt = prompt + existing_text
+
         inputs = self.tokenizer(full_prompt, return_tensors="pt").to(self.model.device)
         start_time = time.time()
         with torch.no_grad():
@@ -613,13 +597,19 @@ class ReasoningController:
 
     @staticmethod
     def _estimate_question_complexity(question: str):
+        """
+        根据问题文本估算其复杂度，返回一个介于 0~1 之间的浮点数，用于动态调整生成阶段的停止阈值。
+        最终复杂度 = 0.4×长度得分 + 0.25×数字得分 + 0.2×运算符得分 + 0.15×关键词得分，并限制在 [0,1] 内。
+        """
         q = (question or "").lower()
         if not q:
             return 0.0
 
-        len_score = min(len(q) / 320.0, 1.0)
-        num_score = min(len(re.findall(r"\d", q)) / 20.0, 1.0)
-        op_score = min(len(re.findall(r"[=+\-*/^]", q)) / 12.0, 1.0)
+        # 320,20.0,12.0 等待深化到config文件形成超参
+        len_score = min(len(q) / 320.0, 1.0)            #问题长度
+        num_score = min(len(re.findall(r"\d", q)) / 20.0, 1.0)  #数字数量
+        op_score = min(len(re.findall(r"[=+\-*/^]", q)) / 12.0, 1.0) #运算符数量
+        #特定关键词的出现
         keywords = [
             "probability",
             "combin",
@@ -636,6 +626,12 @@ class ReasoningController:
         return min(1.0, 0.4 * len_score + 0.25 * num_score + 0.2 * op_score + 0.15 * kw_score)
 
     def _dynamic_cot_controller(self, question: str, prompt: str, text: str, stage: int):
+        """
+        动态 CoT 的核心控制器，用于在某个阶段评估当前生成文本的质量，决定是否应该继续生成（expand）
+        question：原始问题。prompt：完整的提示文本。text：当前阶段生成的文本。stage：当前阶段编号（1 或 2）
+
+
+        """
         info = Evaluator.extract_answer_info(text, dataset=self.dataset)
         strict_hit = info["answer"] is not None and info["confidence_level"] == "strict"
         has_final_line = ("####" in text) or ("\\boxed{" in text)
@@ -654,6 +650,7 @@ class ReasoningController:
         ]
         has_uncertainty = any(x in lower for x in uncertainty_markers)
 
+        #若严格命中答案，则调用 _probe_step_answer 进行探测，检验探测答案与提取答案是否一致
         probe_consistent = False
         probe_answer = None
         if strict_hit:
@@ -663,6 +660,7 @@ class ReasoningController:
                     probe_answer, info["answer"], dataset=self.dataset
                 )
 
+        #计算奖励分数 reward
         reward = 0.0
         if strict_hit:
             reward += 0.50
@@ -678,12 +676,15 @@ class ReasoningController:
             reward -= 0.15
         reward = max(0.0, min(1.0, reward))
 
+        #根据问题复杂度和阶段计算动态阈值 threshold = base + alpha * complexity
         complexity = self._estimate_question_complexity(question)
         if stage == 1:
             base = getattr(self.config, "DCOT_STAGE1_BASE_THRESHOLD", 0.62)
         else:
             base = getattr(self.config, "DCOT_STAGE2_BASE_THRESHOLD", 0.72)
         threshold = min(0.95, base + getattr(self.config, "DCOT_COMPLEXITY_ALPHA", 0.18) * complexity)
+        
+        #若 reward < threshold，则判定需要继续扩展
         expand = reward < threshold
 
         return {
@@ -699,12 +700,21 @@ class ReasoningController:
         }
 
     def _dynamic_cot_generation(self, question: str, prompt: str):
+        """
+        实现动态 CoT 策略的主流程：分阶段生成文本，每阶段后根据控制器决定是否继续，最终返回完整的生成结果。
+        """
         total_time = 0.0
         total_tokens = 0
 
-        stage1_budget = getattr(self.config, "DCOT_STAGE1_MAX_NEW_TOKENS", 96)
-        stage2_budget = getattr(self.config, "DCOT_STAGE2_MAX_NEW_TOKENS", 192)
-        stage3_budget = getattr(self.config, "DCOT_STAGE3_MAX_NEW_TOKENS", 384)
+        if self.dataset == "math500":
+            # Conservative budgets to avoid severe accuracy drop.
+            stage1_budget = max(384, int(self.config.MAX_NEW_TOKENS * 0.60))
+            stage2_budget = max(640, int(self.config.MAX_NEW_TOKENS * 0.85))
+            stage3_budget = self.config.MAX_NEW_TOKENS
+        else:
+            stage1_budget = getattr(self.config, "DCOT_STAGE1_MAX_NEW_TOKENS", 96)
+            stage2_budget = getattr(self.config, "DCOT_STAGE2_MAX_NEW_TOKENS", 192)
+            stage3_budget = getattr(self.config, "DCOT_STAGE3_MAX_NEW_TOKENS", 384)
         dcot_debug = getattr(self.config, "DCOT_DEBUG", False)
 
         text1, time1, tok1 = self._generate_full_with_budget(prompt, stage1_budget)
@@ -719,7 +729,10 @@ class ReasoningController:
                 f"complexity={ctrl1['complexity']:.3f} expand={ctrl1['expand']}"
             )
 
-        if not ctrl1["expand"]:
+        # For math500, only stop at stage1 when evidence is very strong.
+        if not ctrl1["expand"] and not (
+            self.dataset == "math500" and not (ctrl1["strict_hit"] and ctrl1["probe_consistent"])
+        ):
             return self._finalize_text(text1), total_time, total_tokens
 
         add2 = max(stage2_budget - stage1_budget, 1)
@@ -735,7 +748,9 @@ class ReasoningController:
                 f"complexity={ctrl2['complexity']:.3f} expand={ctrl2['expand']}"
             )
 
-        if not ctrl2["expand"]:
+        if not ctrl2["expand"] and not (
+            self.dataset == "math500" and not (ctrl2["strict_hit"] and ctrl2["probe_consistent"])
+        ):
             return self._finalize_text(text2), total_time, total_tokens
 
         add3 = max(stage3_budget - stage2_budget, 1)
