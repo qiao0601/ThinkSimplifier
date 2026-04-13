@@ -4,11 +4,10 @@ import re
 
 
 class Evaluator:
+    _NUMERIC_DATASETS = {"gsm8k", "svamp", "asdiv", "gsmhard", "aime2024", "amc23"}
+
     _NUM_RE = re.compile(r"[+-]?\d+(?:,\d{3})*(?:\.\d+)?")
     _HASH_RE = re.compile(r"####\s*([^\n\r]+)")
-    _BOXED_RE = re.compile(r"\\boxed\{([^}]*)\}")
-    _BOXED_UNCLOSED_RE = re.compile(r"\\boxed\{([^}\n\r]*)")
-    _FRAC_RE = re.compile(r"\\(?:frac|dfrac|tfrac)\{([^{}]+)\}\{([^{}]+)\}")
     _STRONG_FINAL_RE = re.compile(
         r"^\s*(?:the\s+)?final\s+answer(?:\s+is)?\s*[:：]?\s*([^\n\r]+)\s*$",
         flags=re.IGNORECASE,
@@ -17,70 +16,110 @@ class Evaluator:
         r"^\s*final\s*[:：]\s*([^\n\r]+)\s*$",
         flags=re.IGNORECASE,
     )
+    _STRONG_FINAL_INLINE_RE = re.compile(
+        r"(?:the\s+)?final\s+answer(?:\s+is)?\s*[:：]?\s*([^\n\r]+)",
+        flags=re.IGNORECASE,
+    )
+    _FRAC_RE = re.compile(r"\\(?:frac|dfrac|tfrac)\{([^{}]+)\}\{([^{}]+)\}")
 
     @staticmethod
     def _dataset_alias(dataset: str):
-        d = (dataset or "gsm8k").lower()
+        d = (dataset or "gsm8k").strip().lower()
         if d in {"aime", "aime2024"}:
             return "aime2024"
+        if d in {"amc", "amc23", "amc_23"}:
+            return "amc23"
         if d in {"math", "math500"}:
             return "math500"
+        if d in {"gsmhard", "gsm-hard", "gsm_hard"}:
+            return "gsmhard"
+        if d in {"svamp", "asdiv"}:
+            return d
         return "gsm8k"
 
     @staticmethod
     def _clean_text_for_extraction(text: str):
         if not text:
             return ""
-        text = re.sub(r"<\|[^>]+\|>", " ", text)
-        text = re.sub(r"<[^>]+>", " ", text)
-        return text.strip()
+        t = str(text)
+        t = re.sub(r"<\|[^>]+\|>", " ", t)
+        t = re.sub(r"</?(?:think|answer|analysis|reasoning|final_answer)>", " ", t, flags=re.IGNORECASE)
+        return t.strip()
 
     @staticmethod
     def _normalize_num_str(s: str):
         if s is None:
             return None
-        s = str(s).strip()
-        if not s:
+        x = str(s).strip()
+        if not x:
             return None
-        s = s.replace("$", "").replace(",", "").replace("%", "")
-        s = s.replace("：", ":").replace("，", ",")
-        s = re.sub(r"[^\d\.\-\+]+$", "", s).strip()
-        if s in {"", "+", "-", ".", "+.", "-."}:
+        x = x.replace("$", "").replace(",", "").replace("%", "")
+        x = re.sub(r"\s+", "", x)
+        x = re.sub(r"[^\d.\-+]+$", "", x).strip()
+        if x in {"", "+", "-", ".", "+.", "-."}:
             return None
-        return s
+        return x
+
+    @staticmethod
+    def _strip_outer_brackets(s: str):
+        if s is None:
+            return None
+        x = str(s).strip()
+        pairs = {"(": ")", "[": "]", "{": "}"}
+        changed = True
+        while changed and len(x) >= 2:
+            changed = False
+            head = x[0]
+            tail = x[-1]
+            if head in pairs and pairs[head] == tail:
+                depth = 0
+                ok = True
+                for i, ch in enumerate(x):
+                    if ch == head:
+                        depth += 1
+                    elif ch == tail:
+                        depth -= 1
+                        if depth == 0 and i != len(x) - 1:
+                            ok = False
+                            break
+                if ok and depth == 0:
+                    x = x[1:-1].strip()
+                    changed = True
+        return x
 
     @staticmethod
     def _normalize_math_text(s: str):
         if s is None:
             return None
-        s = str(s).strip()
-        if not s:
+        x = str(s).strip()
+        if not x:
             return None
-        s = s.replace("$", "")
-        s = s.replace("\\left", "").replace("\\right", "")
-        s = s.replace("\\!", "")
-        
-        # unify common LaTeX fraction variants
-        s = s.replace("\\dfrac", "\\frac")
-        s = s.replace("\\tfrac", "\\frac")
-        #\text{Evelyn} Evelyn
-        s = re.sub(r"\\text\{([^{}]+)\}", r"\1", s)
 
-        s = s.replace("\\cdot", "*")
-        s = s.replace("\\times", "*")
-        s = re.sub(r"\s+", "", s)
-        s = re.sub(r"[;.,]+$", "", s)
-        return s if s else None
+        x = x.replace("$", "")
+        x = x.replace("\\left", "").replace("\\right", "")
+        x = x.replace("\\!", "")
+        x = x.replace("\\,", "")
+        x = x.replace("\\dfrac", "\\frac")
+        x = x.replace("\\tfrac", "\\frac")
+        x = re.sub(r"\\text\{([^{}]+)\}", r"\1", x)
+        x = x.replace("\\cdot", "*")
+        x = x.replace("\\times", "*")
+        x = re.sub(r"[;.,]+$", "", x)
+        x = re.sub(r"\s+", "", x)
+
+        x = x.strip()
+        return x if x else None
 
     @staticmethod
     def _latex_frac_to_plain(s: str):
         if not s:
             return s
+        out = s
         while True:
-            new_s = Evaluator._FRAC_RE.sub(r"(\1)/(\2)", s)
-            if new_s == s:
-                return s
-            s = new_s
+            new_out = Evaluator._FRAC_RE.sub(r"(\1)/(\2)", out)
+            if new_out == out:
+                return out
+            out = new_out
 
     @staticmethod
     def _extract_numeric_from_segment(segment: str, dataset: str):
@@ -96,33 +135,35 @@ class Evaluator:
                 if not re.fullmatch(r"[+-]?\d+", x):
                     continue
                 try:
-                    v = int(x)
+                    val = int(x)
                 except Exception:
                     continue
-                if 0 <= abs(v) <= 999:
-                    valid.append(str(v))
+                if 0 <= abs(val) <= 999:
+                    valid.append(str(val))
             if valid:
                 return valid[-1]
+            return None
+
+        if d == "amc23":
+            valid = [x for x in nums if re.fullmatch(r"[+-]?\d+", x)]
+            return valid[-1] if valid else None
+
         return nums[-1]
 
     @staticmethod
     def _extract_expression_from_segment(segment: str):
         if not segment:
             return None
-        s = segment.strip().split("\n")[0].strip()
-        s = re.sub(r"^\s*[:：\-]\s*", "", s)
-        return Evaluator._normalize_math_text(s)
+        line = segment.strip().splitlines()[0].strip()
+        line = re.sub(r"^\s*[:：\-]\s*", "", line)
+        return Evaluator._normalize_math_text(line)
 
     @staticmethod
     def _find_boxed_contents(text: str):
-        """
-        Extract \\boxed{...} with brace matching.
-        Handles nested braces, e.g. \\boxed{(3,\\frac{\\pi}{2})}.
-        Returns list[(content, full_match, start_pos)].
-        """
         results = []
         if not text:
             return results
+
         needle = "\\boxed{"
         i = 0
         n = len(text)
@@ -130,6 +171,7 @@ class Evaluator:
             j = text.find(needle, i)
             if j < 0:
                 break
+
             k = j + len(needle)
             depth = 1
             while k < n and depth > 0:
@@ -143,83 +185,133 @@ class Evaluator:
             if depth == 0:
                 full = text[j:k]
                 content = text[j + len(needle) : k - 1]
-                results.append((content, full, j))
+                results.append((content, full, j, True))
                 i = k
             else:
+                # Unclosed boxed is intentionally marked as non-strict.
                 full = text[j:]
                 content = text[j + len(needle) :]
-                results.append((content, full, j))
+                results.append((content, full, j, False))
                 break
+
         return results
+
+    @staticmethod
+    def _tail_lines_with_pos(text: str, n_lines: int = 8):
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        if not lines:
+            return []
+        tail = lines[-n_lines:]
+        block = "\n".join(tail)
+        start = max(0, len(text) - len(block))
+
+        out = []
+        cursor = 0
+        for ln in tail:
+            out.append((ln.strip(), start + cursor))
+            cursor += len(ln) + 1
+        return out
 
     @staticmethod
     def _collect_strong_final_line_numeric(text: str, dataset: str):
         candidates = []
-        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-        if not lines:
-            return candidates
-
-        tail_lines = lines[-8:]
-        tail_block = "\n".join(tail_lines)
-        tail_start = max(0, len(text) - len(tail_block))
-        cursor = 0
-        for line in tail_lines:
+        for line, pos in Evaluator._tail_lines_with_pos(text, n_lines=10):
             if len(line) > 120:
-                cursor += len(line) + 1
                 continue
+
             m = Evaluator._STRONG_FINAL_RE.match(line) or Evaluator._STRONG_FINAL_SHORT_RE.match(line)
-            if not m:
-                cursor += len(line) + 1
+            if m:
+                ans = Evaluator._extract_numeric_from_segment(m.group(1), dataset)
+                if ans is not None:
+                    candidates.append(
+                        {
+                            "answer": ans,
+                            "source_type": "strong_final_line",
+                            "confidence_level": "strict",
+                            "matched_text": line,
+                            "pos": pos,
+                        }
+                    )
                 continue
-            ans = Evaluator._extract_numeric_from_segment(m.group(1), dataset)
-            if ans is None:
-                cursor += len(line) + 1
+
+            inline_m = Evaluator._STRONG_FINAL_INLINE_RE.search(line)
+            if inline_m:
+                ans = Evaluator._extract_numeric_from_segment(inline_m.group(1), dataset)
+                if ans is not None:
+                    candidates.append(
+                        {
+                            "answer": ans,
+                            "source_type": "strong_final_line",
+                            "confidence_level": "strict",
+                            "matched_text": line,
+                            "pos": pos,
+                        }
+                    )
                 continue
-            candidates.append(
-                {
-                    "answer": ans,
-                    "source_type": "strong_final_line",
-                    "confidence_level": "strict",
-                    "matched_text": line,
-                    "pos": tail_start + cursor,
-                }
-            )
-            cursor += len(line) + 1
+
+            if re.fullmatch(r"[+-]?\d+(?:\.\d+)?", line):
+                ans = Evaluator._normalize_num_str(line)
+                if ans is not None:
+                    candidates.append(
+                        {
+                            "answer": ans,
+                            "source_type": "strong_final_line",
+                            "confidence_level": "strict",
+                            "matched_text": line,
+                            "pos": pos,
+                        }
+                    )
         return candidates
 
     @staticmethod
     def _collect_strong_final_line_math(text: str):
         candidates = []
-        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-        if not lines:
-            return candidates
+        for line, pos in Evaluator._tail_lines_with_pos(text, n_lines=10):
+            if len(line) > 180:
+                continue
 
-        tail_lines = lines[-8:]
-        tail_block = "\n".join(tail_lines)
-        tail_start = max(0, len(text) - len(tail_block))
-        cursor = 0
-        for line in tail_lines:
-            if len(line) > 160:
-                cursor += len(line) + 1
-                continue
             m = Evaluator._STRONG_FINAL_RE.match(line) or Evaluator._STRONG_FINAL_SHORT_RE.match(line)
-            if not m:
-                cursor += len(line) + 1
+            if m:
+                ans = Evaluator._extract_expression_from_segment(m.group(1))
+                if ans is not None:
+                    candidates.append(
+                        {
+                            "answer": ans,
+                            "source_type": "strong_final_line",
+                            "confidence_level": "strict",
+                            "matched_text": line,
+                            "pos": pos,
+                        }
+                    )
                 continue
-            ans = Evaluator._extract_expression_from_segment(m.group(1))
-            if ans is None:
-                cursor += len(line) + 1
+
+            inline_m = Evaluator._STRONG_FINAL_INLINE_RE.search(line)
+            if inline_m:
+                ans = Evaluator._extract_expression_from_segment(inline_m.group(1))
+                if ans is not None:
+                    candidates.append(
+                        {
+                            "answer": ans,
+                            "source_type": "strong_final_line",
+                            "confidence_level": "strict",
+                            "matched_text": line,
+                            "pos": pos,
+                        }
+                    )
                 continue
-            candidates.append(
-                {
-                    "answer": ans,
-                    "source_type": "strong_final_line",
-                    "confidence_level": "strict",
-                    "matched_text": line,
-                    "pos": tail_start + cursor,
-                }
-            )
-            cursor += len(line) + 1
+
+            if line and len(line) <= 80 and not re.search(r"[A-Za-z]{4,}", line):
+                ans = Evaluator._extract_expression_from_segment(line)
+                if ans is not None and ans not in {"####", "\\boxed"}:
+                    candidates.append(
+                        {
+                            "answer": ans,
+                            "source_type": "strong_final_line",
+                            "confidence_level": "strict",
+                            "matched_text": line,
+                            "pos": pos,
+                        }
+                    )
         return candidates
 
     @staticmethod
@@ -230,12 +322,12 @@ class Evaluator:
             return candidates
 
         def add(answer, source_type, matched_text, pos):
-            answer = Evaluator._normalize_num_str(answer)
-            if answer is None:
+            norm = Evaluator._normalize_num_str(answer)
+            if norm is None:
                 return
             candidates.append(
                 {
-                    "answer": answer,
+                    "answer": norm,
                     "source_type": source_type,
                     "confidence_level": "strict",
                     "matched_text": matched_text,
@@ -248,14 +340,14 @@ class Evaluator:
             if ans is not None:
                 add(ans, "hash", m.group(0), m.start())
 
-        for content, full, pos in Evaluator._find_boxed_contents(clean):
+        for content, full, pos, is_closed in Evaluator._find_boxed_contents(clean):
+            if not is_closed:
+                continue
             ans = Evaluator._extract_numeric_from_segment(content, dataset)
             if ans is not None:
                 add(ans, "boxed", full, pos)
 
-        for c in Evaluator._collect_strong_final_line_numeric(clean, dataset):
-            candidates.append(c)
-
+        candidates.extend(Evaluator._collect_strong_final_line_numeric(clean, dataset))
         return candidates
 
     @staticmethod
@@ -266,12 +358,12 @@ class Evaluator:
             return candidates
 
         def add(answer, source_type, matched_text, pos):
-            answer = Evaluator._normalize_math_text(answer)
-            if answer is None:
+            norm = Evaluator._normalize_math_text(answer)
+            if norm is None:
                 return
             candidates.append(
                 {
-                    "answer": answer,
+                    "answer": norm,
                     "source_type": source_type,
                     "confidence_level": "strict",
                     "matched_text": matched_text,
@@ -279,16 +371,24 @@ class Evaluator:
                 }
             )
 
-        # For math500, do not use hash candidates.
-        for content, full, pos in Evaluator._find_boxed_contents(clean):
+        for content, full, pos, is_closed in Evaluator._find_boxed_contents(clean):
+            if not is_closed:
+                continue
             ans = Evaluator._extract_expression_from_segment(content)
             if ans is not None:
                 add(ans, "boxed", full, pos)
 
-        for c in Evaluator._collect_strong_final_line_math(clean):
-            candidates.append(c)
-
+        candidates.extend(Evaluator._collect_strong_final_line_math(clean))
         return candidates
+
+    @staticmethod
+    def _canonical_key(answer: str, dataset: str):
+        d = Evaluator._dataset_alias(dataset)
+        if answer is None:
+            return None
+        if d in Evaluator._NUMERIC_DATASETS:
+            return Evaluator._normalize_num_str(answer)
+        return Evaluator._normalize_math_text(Evaluator._latex_frac_to_plain(str(answer)))
 
     @staticmethod
     def _pick_best_candidate(candidates, text: str, dataset: str):
@@ -305,36 +405,43 @@ class Evaluator:
         d = Evaluator._dataset_alias(dataset)
         text_len = max(len(text), 1)
         source_base = {
-            "hash": 5.2,
-            "boxed": 5.0,
-            "strong_final_line": 4.4,
+            "hash": 5.5,
+            "boxed": 5.4,
+            "strong_final_line": 5.0,
         }
 
-        scores = {}
-        meta = {}
-        counts = {}
+        score_map = {}
+        rep_map = {}
+        count_map = {}
+
         for c in candidates:
-            value = c["answer"]
-            counts[value] = counts.get(value, 0) + 1
-            recency = 0.9 * (c["pos"] / text_len)
-            score = source_base.get(c["source_type"], 1.0) + recency
-            if d == "aime2024" and re.fullmatch(r"\d{1,3}", value):
+            value = c.get("answer")
+            key = Evaluator._canonical_key(value, d) or value
+            if key is None:
+                continue
+
+            recency = 0.9 * (float(c.get("pos", 0)) / float(text_len))
+            score = source_base.get(c.get("source_type"), 1.0) + recency
+            if d == "aime2024" and re.fullmatch(r"\d{1,3}", str(value or "")):
                 score += 0.5
-            scores[value] = scores.get(value, 0.0) + score
-            if value not in meta or c["pos"] > meta[value]["pos"]:
-                meta[value] = c
 
-        for value, cnt in counts.items():
+            score_map[key] = score_map.get(key, 0.0) + score
+            count_map[key] = count_map.get(key, 0) + 1
+            if key not in rep_map or c.get("pos", -1) > rep_map[key].get("pos", -1):
+                rep_map[key] = c
+
+        for key, cnt in count_map.items():
             if cnt > 1:
-                scores[value] += 0.6 * (cnt - 1)
+                score_map[key] += 0.6 * (cnt - 1)
 
-        best_value = max(scores.items(), key=lambda x: x[1])[0]
-        best_meta = meta[best_value]
+        best_key = max(score_map.items(), key=lambda kv: kv[1])[0]
+        best = rep_map[best_key]
+
         return {
-            "answer": best_value,
+            "answer": best.get("answer"),
             "confidence_level": "strict",
-            "source_type": best_meta["source_type"],
-            "matched_text": best_meta["matched_text"],
+            "source_type": best.get("source_type"),
+            "matched_text": best.get("matched_text"),
             "num_candidates": len(candidates),
             "all_candidates": candidates,
         }
@@ -354,18 +461,19 @@ class Evaluator:
             }
 
         if d == "math500":
-            candidates = Evaluator._collect_candidates_math(clean)
+            cands = Evaluator._collect_candidates_math(clean)
         else:
-            candidates = Evaluator._collect_candidates_numeric(clean, d)
-        return Evaluator._pick_best_candidate(candidates, clean, d)
+            cands = Evaluator._collect_candidates_numeric(clean, d)
+        return Evaluator._pick_best_candidate(cands, clean, d)
 
     @staticmethod
     def extract_answer(text: str, dataset: str = "gsm8k"):
-        return Evaluator.extract_answer_info(text, dataset=dataset)["answer"]
+        return Evaluator.extract_answer_info(text, dataset=dataset).get("answer")
 
     @staticmethod
     def extract_true_answer(sample: dict, dataset: str = "gsm8k"):
         d = Evaluator._dataset_alias(dataset)
+
         if d == "gsm8k":
             raw = str(sample.get("answer", ""))
             ans = Evaluator.extract_answer(raw, dataset=d)
@@ -374,24 +482,63 @@ class Evaluator:
             nums = Evaluator._NUM_RE.findall(raw)
             return Evaluator._normalize_num_str(nums[-1]) if nums else None
 
-        if d == "math500":
+        if d == "svamp":
+            raw = str(sample.get("Answer", sample.get("answer", ""))).strip()
+            ans = Evaluator._extract_numeric_from_segment(raw, dataset=d)
+            if ans is not None:
+                return ans
+            nums = Evaluator._NUM_RE.findall(raw)
+            return Evaluator._normalize_num_str(nums[-1]) if nums else None
+
+        if d == "asdiv":
             raw = str(sample.get("answer", "")).strip()
-            if not raw:
-                raw = str(sample.get("solution", "")).strip()
-            return Evaluator._normalize_math_text(raw)
+            ans = Evaluator._extract_numeric_from_segment(raw, dataset=d)
+            if ans is not None:
+                return ans
+            nums = Evaluator._NUM_RE.findall(raw)
+            return Evaluator._normalize_num_str(nums[-1]) if nums else None
+
+        if d == "gsmhard":
+            raw = str(sample.get("target", sample.get("answer", ""))).strip()
+            ans = Evaluator._normalize_num_str(raw)
+            if ans is not None:
+                return ans
+            nums = Evaluator._NUM_RE.findall(raw)
+            return Evaluator._normalize_num_str(nums[-1]) if nums else None
 
         if d == "aime2024":
             raw = str(sample.get("answer", "")).strip()
             m = re.search(r"\d{1,3}", raw)
             return m.group(0) if m else None
 
-        raw = str(sample.get("answer", "")).strip()
-        return raw if raw else None
+        if d == "amc23":
+            raw = str(sample.get("answer", "")).strip()
+            m = re.search(r"[+-]?\d+", raw)
+            return m.group(0) if m else None
+
+        # math500
+        raw_answer = str(sample.get("answer", "")).strip()
+        if raw_answer:
+            info = Evaluator.extract_answer_info(raw_answer, dataset="math500")
+            if info.get("answer") is not None:
+                return info["answer"]
+            norm = Evaluator._normalize_math_text(raw_answer)
+            if norm:
+                return norm
+
+        raw_solution = str(sample.get("solution", "")).strip()
+        if raw_solution:
+            info = Evaluator.extract_answer_info(raw_solution, dataset="math500")
+            if info.get("answer") is not None:
+                return info["answer"]
+
+        return None
 
     @staticmethod
     def _extract_answer_with_deepseek(text: str, dataset: str = "gsm8k", question: str = None, config=None):
         if config is None or not getattr(config, "USE_DEEPSEEK_EXTRACTOR", False):
             return None
+
         api_key = getattr(config, "DEEPSEEK_API_KEY", "")
         if not api_key:
             return None
@@ -408,13 +555,15 @@ class Evaluator:
             timeout=getattr(config, "DEEPSEEK_TIMEOUT", 30),
         )
 
-        max_chars = getattr(config, "DEEPSEEK_MAX_CHARS", 2500)
+        max_chars = int(getattr(config, "DEEPSEEK_MAX_CHARS", 2500))
         clean_text = Evaluator._clean_text_for_extraction(text)[-max_chars:]
 
         if d == "math500":
             answer_tip = "The answer can be a mathematical expression string."
         elif d == "aime2024":
-            answer_tip = "The answer must be one integer string in [0,999]."
+            answer_tip = "The answer must be one integer string in [0, 999]."
+        elif d == "amc23":
+            answer_tip = "The answer must be one integer string."
         else:
             answer_tip = "The answer must be a bare number string."
 
@@ -440,7 +589,7 @@ class Evaluator:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                max_tokens=64,
+                max_tokens=80,
             )
             content = resp.choices[0].message.content
             data = json.loads(content)
@@ -453,6 +602,9 @@ class Evaluator:
             if d == "aime2024":
                 m = re.search(r"\d{1,3}", str(ans))
                 return m.group(0) if m else None
+            if d == "amc23":
+                m = re.search(r"[+-]?\d+", str(ans))
+                return m.group(0) if m else None
             return Evaluator._normalize_num_str(ans)
         except Exception:
             return None
@@ -460,7 +612,7 @@ class Evaluator:
     @staticmethod
     def extract_answer_robust(text: str, dataset: str = "gsm8k", question: str = None, config=None):
         info = Evaluator.extract_answer_info(text, dataset=dataset)
-        local_answer = info["answer"]
+        local_answer = info.get("answer")
         if local_answer is not None:
             return local_answer, info
 
@@ -493,17 +645,19 @@ class Evaluator:
     def _to_float_like(s: str):
         if s is None:
             return None
-        s = str(s).strip()
-        s = Evaluator._latex_frac_to_plain(s)
-        s = s.replace("(", "").replace(")", "")
-        s = s.replace("{", "").replace("}", "")
-        s = Evaluator._normalize_num_str(s)
-        if s is None:
+        x = str(s).strip()
+        if not x:
+            return None
+        x = Evaluator._latex_frac_to_plain(x)
+        x = x.replace("(", "").replace(")", "")
+        x = x.replace("{", "").replace("}", "")
+        x = Evaluator._normalize_num_str(x)
+        if x is None:
             return None
         try:
-            return float(s)
+            return float(x)
         except Exception:
-            m = re.fullmatch(r"([+-]?\d+)\s*/\s*([+-]?\d+)", s)
+            m = re.fullmatch(r"([+-]?\d+)\s*/\s*([+-]?\d+)", x)
             if not m:
                 return None
             den = float(m.group(2))
@@ -522,12 +676,36 @@ class Evaluator:
         return abs(aa - bb) <= atol
 
     @staticmethod
+    def _split_top_level(expr: str, sep: str = ","):
+        parts = []
+        cur = []
+        depth_paren = 0
+        depth_brace = 0
+        for ch in expr:
+            if ch == "(":
+                depth_paren += 1
+            elif ch == ")":
+                depth_paren = max(0, depth_paren - 1)
+            elif ch == "{":
+                depth_brace += 1
+            elif ch == "}":
+                depth_brace = max(0, depth_brace - 1)
+
+            if ch == sep and depth_paren == 0 and depth_brace == 0:
+                parts.append("".join(cur))
+                cur = []
+            else:
+                cur.append(ch)
+        parts.append("".join(cur))
+        return parts
+
+    @staticmethod
     def answers_equivalent(pred, truth, dataset: str = "gsm8k"):
         d = Evaluator._dataset_alias(dataset)
         if pred is None or truth is None:
             return False
 
-        if d in {"gsm8k", "aime2024"}:
+        if d in Evaluator._NUMERIC_DATASETS:
             return Evaluator.numeric_equal(pred, truth)
 
         if Evaluator.numeric_equal(pred, truth):
@@ -537,20 +715,28 @@ class Evaluator:
         t = Evaluator._normalize_math_text(Evaluator._latex_frac_to_plain(str(truth)))
         if p is None or t is None:
             return False
+
         if p == t:
             return True
 
-        if "," in p and "," in t:
-            p_items = [x for x in p.split(",") if x != ""]
-            t_items = [x for x in t.split(",") if x != ""]
-            if len(p_items) == len(t_items):
-                ok = True
-                for x, y in zip(p_items, t_items):
-                    if not (x == y or Evaluator.numeric_equal(x, y)):
-                        ok = False
-                        break
-                if ok:
-                    return True
+        if p.lower() == t.lower():
+            return True
+
+        p_items = [x.strip() for x in Evaluator._split_top_level(Evaluator._strip_outer_brackets(p), sep=",")]
+        t_items = [x.strip() for x in Evaluator._split_top_level(Evaluator._strip_outer_brackets(t), sep=",")]
+        if len(p_items) > 1 and len(p_items) == len(t_items):
+            ok = True
+            for x, y in zip(p_items, t_items):
+                if x == y:
+                    continue
+                if Evaluator.numeric_equal(x, y):
+                    continue
+                if x.lower() == y.lower():
+                    continue
+                ok = False
+                break
+            if ok:
+                return True
 
         return False
 

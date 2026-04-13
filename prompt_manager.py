@@ -7,15 +7,23 @@ class PromptManager:
         d = (dataset or "gsm8k").lower()
         if d in {"aime", "aime2024"}:
             return "aime2024"
+        if d in {"amc", "amc23", "amc_23"}:
+            return "amc23"
         if d in {"math", "math500"}:
             return "math500"
+        if d in {"gsmhard", "gsm-hard"}:
+            return "gsmhard"
+        if d == "svamp":
+            return "svamp"
+        if d == "asdiv":
+            return "asdiv"
         return "gsm8k"
 
     @staticmethod
     def _final_suffix(dataset: str) -> str:
         d = PromptManager._dataset_alias(dataset)
 
-        if d == "gsm8k":
+        if d in {"gsm8k", "svamp", "asdiv", "gsmhard"}:
             return (
                 "\n\n"
                 "Important: put the final answer on a NEW LINE exactly as:\n"
@@ -32,6 +40,18 @@ class PromptManager:
                 "Examples:\n"
                 "#### 7\n"
                 "#### 125\n"
+                "Do not write units, words, equations, boxes, tags, or any text after that line."
+            )
+
+        if d == "amc23":
+            return (
+                "\n\n"
+                "Important: the final answer must be one integer.\n"
+                "Put the final answer on a NEW LINE exactly as:\n"
+                "#### <integer>\n"
+                "Examples:\n"
+                "#### 27\n"
+                "#### -1\n"
                 "Do not write units, words, equations, boxes, tags, or any text after that line."
             )
 
@@ -52,10 +72,13 @@ class PromptManager:
         )
 
     @staticmethod
-    def build_prompt(question, strategy="baseline", dataset="gsm8k"):
+    def build_prompt(question, input_strategy=None, dataset="gsm8k"):
         q = f"Question: {question}\n"
+        strategy = input_strategy or "baseline"
 
-        if strategy == "prompt_baseline_cot":
+        if strategy == "baseline":
+            instr = "Answer: Let's think step by step."
+        elif strategy == "prompt_baseline_cot":
             instr = "Answer: Let's think step by step."
         elif strategy == "prompt_concise_cot":
             instr = (
@@ -76,18 +99,7 @@ class PromptManager:
                 "Answer: Let's think step by step. Reasoning budget: at most 6 lines; "
                 "each line should be one equation or one variable update."
             )
-        elif strategy in {
-            "baseline",
-            "confidence_stop",
-            "dynamic_cot",
-            "answer_consistency",
-            "es_cot",
-        }:
-            instr = (
-                "Answer: Start with a short reasoning draft. "
-                "Expand only if still uncertain."
-            )
         else:
-            raise ValueError(f"Unknown strategy: {strategy}")
+            raise ValueError(f"Unknown input strategy: {strategy}")
 
         return q + instr + PromptManager._final_suffix(dataset)
